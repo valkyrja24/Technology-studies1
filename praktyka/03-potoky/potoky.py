@@ -172,7 +172,7 @@ if __name__ == "__main__":
         print("процесорний / настінний, numpy", os.cpu_count(), "потоків:",
               round(vyhid["proc_nast_numpy"], 2))
     else:
-        print("numpy не встановлено — ⭐ пропущено (pip install numpy)")
+        print("numpy не встановлено — пропущено (pip install numpy)")
 
     shlyakh = os.path.join(os.path.dirname(os.path.abspath(__file__)), "rezultaty.json")
     with open(shlyakh, "w", encoding="utf-8") as f:
