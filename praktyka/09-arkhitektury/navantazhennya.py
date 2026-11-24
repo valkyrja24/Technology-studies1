@@ -37,22 +37,44 @@ def odyn_zapyt(port, zapyt, taimaut):
         s.close()
 
 
-def kliyent(nomer, port, zapytiv, taimaut, kliuch, chasy, vuzly_lich, pomylky, zamok):
+class VidpovidPomylka(Exception):
+    """Вузол відповів, але не "ok" (наприклад, сховище недоступне)."""
+
+
+def kliyent(nomer, port, zapytiv, taimaut, kliuch, chasy, vuzly_lich, pomylky, zamok,
+            povtoriv=0, povtory_lich=None):
     for i in range(zapytiv):
         zapyt = {"dia": "dodaty", "zapys": {"kliyent": nomer, "nomer": i}}
         if kliuch:
+            # ключ створюється ОДИН раз на запис і не змінюється між повторами —
+            # саме так сховище впізнає повтор і не запише дублікат
             zapyt["kliuch"] = str(uuid.uuid4())
         t0 = time.perf_counter()
-        try:
-            vidpovid = odyn_zapyt(port, zapyt, taimaut)
-            dt = (time.perf_counter() - t0) * 1000
-            with zamok:
-                chasy.append(dt)
-                v = vidpovid.get("vuzol", "?")
-                vuzly_lich[v] = vuzly_lich.get(v, 0) + 1
-        except (OSError, ConnectionError, ValueError) as e:
-            with zamok:
-                pomylky.append(type(e).__name__)
+        for sproba in range(povtoriv + 1):
+            try:
+                vidpovid = odyn_zapyt(port, zapyt, taimaut)
+                if vidpovid.get("status") != "ok":
+                    raise VidpovidPomylka(vidpovid.get("chomu", ""))
+                dt = (time.perf_counter() - t0) * 1000
+                with zamok:
+                    chasy.append(dt)
+                    v = vidpovid.get("vuzol", "?")
+                    vuzly_lich[v] = vuzly_lich.get(v, 0) + 1
+                    if sproba and povtory_lich is not None:
+                        povtory_lich["uspishni_povtory"] += 1
+                break
+            except (OSError, ConnectionError, ValueError, VidpovidPomylka) as e:
+                if sproba < povtoriv:
+                    # балансувальник роздає по черзі — наступне з'єднання
+                    # піде на інший вузол; коротка пауза дає перевірці живості
+                    # шанс виключити мертвий
+                    with zamok:
+                        if povtory_lich is not None:
+                            povtory_lich["sprob_povtoru"] += 1
+                    time.sleep(0.05 * (sproba + 1))
+                    continue
+                with zamok:
+                    pomylky.append(type(e).__name__)
 
 
 def main():
@@ -63,15 +85,19 @@ def main():
     p.add_argument("--zapytiv", type=int, default=100, help="запитів на кожного клієнта")
     p.add_argument("--taimaut", type=float, default=5.0)
     p.add_argument("--kliuch", action="store_true", help="додавати ключ ідемпотентності")
+    p.add_argument("--povtoriv", type=int, default=0,
+                   help="скільки разів повторити запит при помилці (⭐4); з --kliuch без дублікатів")
     p.add_argument("--vuzly", type=int, nargs="*", default=[50007, 50008],
                    help="у кого наприкінці питати стан")
     args = p.parse_args()
 
     chasy, pomylky, vuzly_lich = [], [], {}
+    povtory_lich = {"sprob_povtoru": 0, "uspishni_povtory": 0}
     zamok = threading.Lock()
     potoky = [threading.Thread(target=kliyent,
                                args=(n, args.port, args.zapytiv, args.taimaut,
-                                     args.kliuch, chasy, vuzly_lich, pomylky, zamok))
+                                     args.kliuch, chasy, vuzly_lich, pomylky, zamok,
+                                     args.povtoriv, povtory_lich))
               for n in range(args.kliyentiv)]
 
     t0 = time.perf_counter()
@@ -92,6 +118,9 @@ def main():
               f"максимум {max(chasy):.2f} мс")
     if vuzly_lich:
         print("обслужили: " + " · ".join(f"{k}: {v}" for k, v in sorted(vuzly_lich.items())))
+    if args.povtoriv:
+        print(f"повтори: спроб {povtory_lich['sprob_povtoru']} · "
+              f"запитів, урятованих повтором {povtory_lich['uspishni_povtory']}")
     if pomylky:
         vydy = {}
         for e in pomylky:
